@@ -14,10 +14,22 @@ struct AttendanceView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Pet.name) private var pets: [Pet]
     @Query(sort: \AttendanceRecord.date, order: .reverse) private var records: [AttendanceRecord]
+    @Query(sort: \Household.name) private var households: [Household]
 
     @AppStorage("tintTheme") private var tintTheme: TintTheme = .sky
+    @AppStorage(CurrentLocation.key) private var currentLocationID = ""
     @State private var showingNewRecord = false
     @State private var exportURL: URL?
+
+    private var currentLocation: Household? {
+        CurrentLocation.resolve(from: households, idString: currentLocationID)
+    }
+
+    /// History for the current location only (all records when none exist).
+    private var visibleRecords: [AttendanceRecord] {
+        guard let currentLocation else { return records }
+        return records.filter { $0.location == currentLocation.name }
+    }
 
     var body: some View {
         NavigationStack {
@@ -36,8 +48,8 @@ struct AttendanceView: View {
                     .listRowInsets(EdgeInsets())
                 }
 
-                Section("History (\(records.count))") {
-                    ForEach(records) { record in
+                Section("History (\(visibleRecords.count))") {
+                    ForEach(visibleRecords) { record in
                         NavigationLink {
                             AttendanceRecordDetailView(record: record)
                         } label: {
@@ -45,20 +57,23 @@ struct AttendanceView: View {
                         }
                     }
                     .onDelete { offsets in
-                        for index in offsets { context.delete(records[index]) }
+                        for index in offsets { context.delete(visibleRecords[index]) }
                     }
                 }
             }
             .themedSurface(tintTheme)
             .navigationTitle("Attendance")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .leadingBar) {
+                    LocationMenu()
+                }
+                ToolbarItem(placement: .trailingBar) {
                     Button {
-                        exportURL = CSVExporter.exportAttendance(records)
+                        exportURL = CSVExporter.exportAttendance(visibleRecords)
                     } label: {
                         Image(systemName: "square.and.arrow.up")
                     }
-                    .disabled(records.isEmpty)
+                    .disabled(visibleRecords.isEmpty)
                 }
             }
             .sheet(isPresented: $showingNewRecord) {
@@ -110,17 +125,20 @@ struct TakeAttendanceView: View {
     @AppStorage("lastAttendanceLocation") private var lastLocation = "House"
     @AppStorage("tintTheme") private var tintTheme: TintTheme = .sky
 
+    @AppStorage(CurrentLocation.key) private var currentLocationID = ""
+
     @State private var date = Date.now
     @State private var location = ""
     @State private var notes = ""
     @State private var presentIDs: Set<UUID> = []
-    @State private var selectedHousehold: Household?
     @State private var showConfetti = false
 
+    private var currentLocation: Household? {
+        CurrentLocation.resolve(from: households, idString: currentLocationID)
+    }
+
     private var activePets: [Pet] {
-        let active = pets.filter(\.isActive)
-        guard let selectedHousehold else { return active }
-        return active.filter { $0.household?.id == selectedHousehold.id }
+        pets.filter(\.isActive).at(currentLocation)
     }
 
     /// Recent distinct locations for one-tap reuse.
@@ -138,32 +156,24 @@ struct TakeAttendanceView: View {
         Form {
             Section("When & where") {
                 DatePicker("Date", selection: $date)
-                if !households.isEmpty {
-                    Picker("Household", selection: $selectedHousehold) {
-                        Text("All pets").tag(nil as Household?)
-                        ForEach(households) { h in
-                            Text(h.name).tag(h as Household?)
+                if let currentLocation {
+                    // Location comes from the app-wide switcher.
+                    LabeledContent("Location", value: currentLocation.name)
+                } else {
+                    // No locations set up yet — fall back to free text.
+                    TextField("Location (House, Barn…)", text: $location)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach(recentLocations, id: \.self) { loc in
+                                Button(loc) { location = loc }
+                                    .buttonStyle(.bordered)
+                                    .buttonBorderShape(.capsule)
+                                    .font(.subheadline)
+                            }
                         }
                     }
-                    .onChange(of: selectedHousehold) {
-                        if let h = selectedHousehold {
-                            location = h.name
-                            presentIDs.removeAll()
-                        }
-                    }
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
                 }
-                TextField("Location (House, Barn…)", text: $location)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack {
-                        ForEach(recentLocations, id: \.self) { loc in
-                            Button(loc) { location = loc }
-                                .buttonStyle(.bordered)
-                                .buttonBorderShape(.capsule)
-                                .font(.subheadline)
-                        }
-                    }
-                }
-                .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
             }
 
             Section {
@@ -220,17 +230,18 @@ struct TakeAttendanceView: View {
             }
         }
         .navigationTitle("Take Attendance")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") { save() }
-                    .disabled(location.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(currentLocation == nil
+                              && location.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
-        .onAppear { location = lastLocation }
+        .onAppear { if currentLocation == nil { location = lastLocation } }
     }
 
     private func toggle(_ pet: Pet) {
@@ -244,7 +255,8 @@ struct TakeAttendanceView: View {
     private func save() {
         let record = AttendanceRecord(
             date: date,
-            location: location.trimmingCharacters(in: .whitespaces),
+            location: currentLocation?.name
+                ?? location.trimmingCharacters(in: .whitespaces),
             notes: notes
         )
         context.insert(record)
@@ -290,6 +302,6 @@ struct AttendanceRecordDetailView: View {
             }
         }
         .navigationTitle("Attendance")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
     }
 }

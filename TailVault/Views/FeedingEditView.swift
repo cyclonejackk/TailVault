@@ -121,7 +121,7 @@ struct FeedingEditView: View {
         }
         .themedSurface(tintTheme)
         .navigationTitle(feeding == nil ? "New Food" : "Edit Food")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }

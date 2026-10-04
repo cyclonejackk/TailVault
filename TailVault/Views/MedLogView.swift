@@ -37,12 +37,20 @@ struct MedLogView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Given ✓") {
-                            med.logDose()
-                            Haptics.success()
-                        }
+                        if med.dosesGivenToday > 0 {
+                            Button("Given ✓") {
+                                med.logDose()
+                                Haptics.success()
+                            }
                             .buttonStyle(.borderedProminent)
                             .tint(.green)
+                        } else {
+                            Button("Given ✓") {
+                                med.logDose()
+                                Haptics.success()
+                            }
+                            .buttonStyle(.bordered)
+                        }
                         Button {
                             loggingMed = med
                         } label: {
@@ -82,9 +90,9 @@ struct MedLogView: View {
         }
         .themedSurface(tintTheme)
         .navigationTitle("\(pet.name) — Med Log")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .trailingBar) {
                 Menu {
                     ShareLink(item: VetReport.medicationHistory(for: pet)) {
                         Label("Send report to vet (text)", systemImage: "cross.case")
@@ -105,7 +113,7 @@ struct MedLogView: View {
         }
         .sheet(item: $loggingMed) { med in
             NavigationStack { LogDoseSheet(medication: med) }
-                .presentationDetents([.medium])
+                .mediumSheetDetent()
         }
     }
 }
@@ -132,7 +140,7 @@ private struct LogDoseSheet: View {
             }
         }
         .navigationTitle("Log Dose")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }

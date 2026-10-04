@@ -7,6 +7,94 @@
 //
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
+// MARK: - Platform shims (iOS + macOS from one codebase)
+
+#if canImport(UIKit)
+/// Cross-platform image type — UIImage on iOS, NSImage on macOS.
+typealias PlatformImage = UIImage
+extension Image {
+    init(platformImage: PlatformImage) { self.init(uiImage: platformImage) }
+}
+#elseif canImport(AppKit)
+typealias PlatformImage = NSImage
+extension Image {
+    init(platformImage: PlatformImage) { self.init(nsImage: platformImage) }
+}
+#endif
+
+#if os(macOS)
+/// iOS-only text-input modifiers, stubbed as no-ops so shared call
+/// sites compile unchanged on the Mac (which has a real keyboard).
+enum UIKeyboardType {
+    case decimalPad, numbersAndPunctuation, phonePad, emailAddress
+}
+enum TextInputAutocapitalization {
+    case never, words, sentences, characters
+}
+extension View {
+    func keyboardType(_ type: UIKeyboardType) -> some View { self }
+    func textInputAutocapitalization(_ style: TextInputAutocapitalization?) -> some View { self }
+}
+#endif
+
+extension View {
+    /// `.navigationBarTitleDisplayMode(.inline)` on iOS; no-op on macOS,
+    /// where the modifier doesn't exist.
+    @ViewBuilder
+    func inlineNavigationTitle() -> some View {
+        #if os(iOS)
+        self.navigationBarTitleDisplayMode(.inline)
+        #else
+        self
+        #endif
+    }
+
+    /// Half-height sheet on iOS; macOS sheets just size to fit.
+    @ViewBuilder
+    func mediumSheetDetent() -> some View {
+        #if os(iOS)
+        self.presentationDetents([.medium])
+        #else
+        self
+        #endif
+    }
+}
+
+extension ToolbarItemPlacement {
+    /// `.topBarTrailing` on iOS, trailing edge of the window toolbar on macOS.
+    static var trailingBar: ToolbarItemPlacement {
+        #if os(iOS)
+        .topBarTrailing
+        #else
+        .automatic
+        #endif
+    }
+    /// `.topBarLeading` on iOS, next to the sidebar toggle on macOS.
+    static var leadingBar: ToolbarItemPlacement {
+        #if os(iOS)
+        .topBarLeading
+        #else
+        .navigation
+        #endif
+    }
+}
+
+extension Color {
+    /// Grouped-list background on iOS, window background on macOS.
+    static var groupedBackground: Color {
+        #if os(iOS)
+        Color(.systemGroupedBackground)
+        #else
+        Color(nsColor: .windowBackgroundColor)
+        #endif
+    }
+}
 
 enum TintTheme: String, CaseIterable, Identifiable {
     case mono, sky, blush, sage, lavender, peach
@@ -37,7 +125,14 @@ enum TintTheme: String, CaseIterable, Identifiable {
     }
 
     /// Swatch shown in the Settings picker.
-    var swatch: Color { self == .mono ? Color(.systemGray3) : accent }
+    var swatch: Color {
+        guard self == .mono else { return accent }
+        #if os(iOS)
+        return Color(.systemGray3)
+        #else
+        return Color(nsColor: .systemGray).opacity(0.6)
+        #endif
+    }
 }
 
 // MARK: - Background wash
@@ -56,7 +151,7 @@ private struct ThemedSurface: ViewModifier {
                 .scrollContentBackground(.hidden)
                 .background {
                     ZStack {
-                        Color(.systemGroupedBackground)
+                        Color.groupedBackground
                         theme.accent.opacity(scheme == .dark ? 0.10 : 0.07)
                     }
                     .ignoresSafeArea()
@@ -113,7 +208,10 @@ struct TintThemePicker: View {
 
 enum Haptics {
     static func success() {
+        #if os(iOS)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+        #endif
+        // No haptics on macOS — checking things off is its own reward.
     }
 }
 

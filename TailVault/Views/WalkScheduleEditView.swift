@@ -132,7 +132,7 @@ struct WalkScheduleEditView: View {
         }
         .themedSurface(tintTheme)
         .navigationTitle(schedule == nil ? "New Routine" : "Edit Routine")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }

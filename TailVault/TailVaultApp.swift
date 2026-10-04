@@ -19,13 +19,25 @@ struct TailVaultApp: App {
             Medication.self, MedDoseLog.self, Feeding.self, FeedLog.self,
             VetClinic.self, VetVisit.self,
             AttendanceRecord.self, AttendanceEntry.self,
-            Household.self, ActivityLog.self, WalkSchedule.self,
+            Household.self, ActivityLog.self, WalkSchedule.self, ChoreTask.self,
+            TodoItem.self,
             PetDocument.self, Expense.self, JournalEntry.self
         ])
+        // iCloud sync (CloudKit private database). Existing on-device data
+        // is uploaded on first launch after the entitlement is added.
+        let config = ModelConfiguration(
+            schema: schema,
+            cloudKitDatabase: .private("iCloud.com.nateohrt.tailvault")
+        )
         do {
-            let container = try ModelContainer(for: schema)
+            let container = try ModelContainer(for: schema, configurations: [config])
             let context = ModelContext(container)
+            #if os(iOS)
+            // Never seed on the Mac: its store starts empty until the first
+            // iCloud sync lands, and seeding there would duplicate every
+            // sample record once the iPhone's data arrives.
             SampleData.seedIfEmpty(context: context)
+            #endif
             SampleData.migrateLegacyFood(context: context)
             return container
         } catch {
@@ -46,9 +58,22 @@ struct TailVaultApp: App {
                     if let meds = try? context.fetch(FetchDescriptor<Medication>()) {
                         NotificationManager.syncAll(medications: meds)
                     }
+                    // Seed cleaning chores for any new species/location
+                    // pairs, then refresh their one-off reminders.
+                    ChoreDefaults.autoCreate(context: context)
+                    if let chores = try? context.fetch(FetchDescriptor<ChoreTask>()),
+                       let pets = try? context.fetch(FetchDescriptor<Pet>()) {
+                        NotificationManager.syncAllChores(chores, pets: pets)
+                    }
+                    if let todos = try? context.fetch(FetchDescriptor<TodoItem>()) {
+                        NotificationManager.syncAllTodos(todos)
+                    }
                 }
         }
         .modelContainer(container)
+        #if os(macOS)
+        .defaultSize(width: 1080, height: 720)
+        #endif
     }
 }
 

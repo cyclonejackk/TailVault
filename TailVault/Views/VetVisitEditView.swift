@@ -47,7 +47,7 @@ struct VetVisitEditView: View {
         }
         .themedSurface(tintTheme)
         .navigationTitle(visit == nil ? "New Vet Visit" : "Edit Vet Visit")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }

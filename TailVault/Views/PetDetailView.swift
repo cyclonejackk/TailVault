@@ -56,12 +56,12 @@ struct PetDetailView: View {
         }
         .themedSurface(tintTheme)
         .navigationTitle(pet.name)
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .trailingBar) {
                 Button("Edit") { showingEdit = true }
             }
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItem(placement: .trailingBar) {
                 Menu {
                     ShareLink(item: SitterSummary.text(for: pet, allPets: allPets)) {
                         Label("Sitter profile (text)", systemImage: "person.text.rectangle")
@@ -108,14 +108,14 @@ struct PetDetailView: View {
         }
         .sheet(isPresented: $showingAddActivity) {
             NavigationStack { ActivityLogEditView(pet: pet) }
-                .presentationDetents([.medium])
+                .mediumSheetDetent()
         }
         .sheet(isPresented: $showingAddWalkSchedule) {
             NavigationStack { WalkScheduleEditView(pet: pet, schedule: nil) }
         }
         .sheet(isPresented: $showingAddExpense) {
             NavigationStack { ExpenseEditView(pet: pet) }
-                .presentationDetents([.medium])
+                .mediumSheetDetent()
         }
         .sheet(isPresented: $showingAddObservation) {
             NavigationStack { ObservationEditView(pet: pet) }
@@ -142,11 +142,11 @@ struct PetDetailView: View {
 
     @ViewBuilder
     private var header: some View {
-        if let data = pet.photoData, let image = UIImage(data: data) {
+        if let data = pet.photoData, let image = PlatformImage(data: data) {
             // Big photo banner with the name over a bottom scrim.
             Section {
                 ZStack(alignment: .bottomLeading) {
-                    Image(uiImage: image)
+                    Image(platformImage: image)
                         .resizable()
                         .scaledToFill()
                         .frame(maxWidth: .infinity)
@@ -212,7 +212,7 @@ struct PetDetailView: View {
             DetailRow(label: "Microchip", value: pet.microchip)
             DetailRow(label: "Rabies tag", value: pet.rabiesTag)
             DetailRow(label: "Collar/Tag #", value: pet.collarTag)
-            DetailRow(label: "Household", value: pet.household?.name ?? "")
+            DetailRow(label: "Location", value: pet.household?.name ?? "")
             if let w = pet.currentWeight {
                 DetailRow(label: "Weight", value: String(format: "%.1f lbs (%@)", w.pounds,
                           w.date.formatted(date: .abbreviated, time: .omitted)))
@@ -530,8 +530,8 @@ struct PetDetailView: View {
             ForEach(pet.observations.sorted { $0.date > $1.date }.prefix(5),
                     id: \.persistentModelID) { obs in
                 HStack(alignment: .top, spacing: 10) {
-                    if let data = obs.photoData, let image = UIImage(data: data) {
-                        Image(uiImage: image)
+                    if let data = obs.photoData, let image = PlatformImage(data: data) {
+                        Image(platformImage: image)
                             .resizable().scaledToFill()
                             .frame(width: 44, height: 44)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -569,8 +569,8 @@ struct PetDetailView: View {
                                 id: \.persistentModelID) { doc in
                             Button { selectedDocument = doc } label: {
                                 VStack(spacing: 4) {
-                                    if let data = doc.imageData, let image = UIImage(data: data) {
-                                        Image(uiImage: image)
+                                    if let data = doc.imageData, let image = PlatformImage(data: data) {
+                                        Image(platformImage: image)
                                             .resizable().scaledToFill()
                                             .frame(width: 84, height: 84)
                                             .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -728,7 +728,7 @@ struct ActivityLogEditView: View {
             TextField("Notes (route, new toy, mood…)", text: $notes, axis: .vertical)
         }
         .navigationTitle("Log Activity")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }

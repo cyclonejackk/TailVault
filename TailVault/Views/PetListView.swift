@@ -28,6 +28,7 @@ struct PetListView: View {
     @Query(sort: \Household.name) private var households: [Household]
 
     @AppStorage("tintTheme") private var tintTheme: TintTheme = .sky
+    @AppStorage(CurrentLocation.key) private var currentLocationID = ""
     @State private var searchText = ""
     @State private var showingAdd = false
     @State private var exportURL: URL?
@@ -37,8 +38,14 @@ struct PetListView: View {
     @State private var sortBy: PetSort = .name
     @State private var speciesFilter: String?
     @State private var sexFilter: String?        // "M" / "F"
-    @State private var householdFilter: Household?
     @State private var showInactive = true
+
+    private var currentLocation: Household? {
+        CurrentLocation.resolve(from: households, idString: currentLocationID)
+    }
+
+    /// Everything at the current location — the base set for this page.
+    private var localPets: [Pet] { pets.at(currentLocation) }
 
     /// Species present in the list, for the filter menu.
     private var speciesPresent: [String] {
@@ -46,11 +53,11 @@ struct PetListView: View {
     }
 
     private var filtersActive: Bool {
-        speciesFilter != nil || sexFilter != nil || householdFilter != nil || !showInactive
+        speciesFilter != nil || sexFilter != nil || !showInactive
     }
 
     private var filteredPets: [Pet] {
-        var result = pets
+        var result = localPets
 
         if !searchText.isEmpty {
             result = result.filter {
@@ -64,9 +71,6 @@ struct PetListView: View {
         }
         if let sexFilter {
             result = result.filter { $0.sex.uppercased().hasPrefix(sexFilter) }
-        }
-        if let householdFilter {
-            result = result.filter { $0.household?.id == householdFilter.id }
         }
         if !showInactive {
             result = result.filter(\.isActive)
@@ -108,16 +112,16 @@ struct PetListView: View {
                 }
             }
             .themedSurface(tintTheme)
-            .navigationTitle(filtersActive ? "Pets (\(filteredPets.count)/\(pets.count))" : "Pets (\(pets.count))")
+            .navigationTitle(filtersActive ? "Pets (\(filteredPets.count)/\(localPets.count))" : "Pets (\(localPets.count))")
             .navigationDestination(for: Pet.self) { PetDetailView(pet: $0) }
             .searchable(text: $searchText, prompt: "Search pets")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .trailingBar) {
                     Button { showingAdd = true } label: {
                         Image(systemName: "plus")
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .trailingBar) {
                     Menu {
                         Picker("Sort by", selection: $sortBy) {
                             ForEach(PetSort.allCases) { Text($0.label).tag($0) }
@@ -139,23 +143,12 @@ struct PetListView: View {
                         }
                         .pickerStyle(.menu)
 
-                        if !households.isEmpty {
-                            Picker("Household", selection: $householdFilter) {
-                                Text("All households").tag(nil as Household?)
-                                ForEach(households) { h in
-                                    Text(h.name).tag(h as Household?)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                        }
-
                         Toggle("Show inactive pets", isOn: $showInactive)
 
                         if filtersActive {
                             Button("Clear filters") {
                                 speciesFilter = nil
                                 sexFilter = nil
-                                householdFilter = nil
                                 showInactive = true
                             }
                         }
@@ -165,15 +158,18 @@ struct PetListView: View {
                               : "line.3.horizontal.decrease.circle")
                     }
                 }
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .leadingBar) {
+                    LocationMenu()
+                }
+                ToolbarItem(placement: .leadingBar) {
                     Menu {
                         Button {
-                            exportURL = CSVExporter.exportPets(pets)
+                            exportURL = CSVExporter.exportPets(localPets)
                         } label: {
                             Label("Export all to spreadsheet (CSV)", systemImage: "tablecells")
                         }
                         ShareLink(
-                            item: SitterSummary.householdText(pets: pets.filter(\.isActive), allPets: pets)
+                            item: SitterSummary.householdText(pets: localPets.filter(\.isActive), allPets: pets)
                         ) {
                             Label("Share household sitter guide", systemImage: "square.and.arrow.up")
                         }
@@ -275,6 +271,7 @@ extension URL: @retroactive Identifiable {
     public var id: String { absoluteString }
 }
 
+#if os(iOS)
 /// UIKit share sheet wrapper — used for file URLs (CSV) so the
 /// receiving app treats them as spreadsheet files.
 struct ShareSheet: UIViewControllerRepresentable {
@@ -286,3 +283,35 @@ struct ShareSheet: UIViewControllerRepresentable {
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
+#else
+/// macOS stand-in for the iOS share sheet, presented from the same
+/// `.sheet` call sites: share, reveal the file in Finder, or close.
+struct ShareSheet: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "doc.fill")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text(url.lastPathComponent)
+                .font(.headline)
+            HStack(spacing: 12) {
+                ShareLink(item: url) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } label: {
+                    Label("Show in Finder", systemImage: "folder")
+                }
+            }
+            Button("Done") { dismiss() }
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(28)
+        .frame(minWidth: 320)
+    }
+}
+#endif

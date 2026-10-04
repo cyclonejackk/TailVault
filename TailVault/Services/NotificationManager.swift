@@ -118,6 +118,102 @@ enum NotificationManager {
         }
     }
 
+    // MARK: Cleaning chores
+
+    /// Refresh reminders for every chore. Counts depend on which pets are
+    /// at each chore's location, so the caller passes the full pet list.
+    static func syncAllChores(_ chores: [ChoreTask], pets: [Pet]) {
+        for chore in chores {
+            syncChoreReminder(for: chore, count: chore.matchingPets(in: pets).count)
+        }
+    }
+
+    /// One notification at 9 AM on the chore's next due day (or the next
+    /// 9 AM if it's already overdue). The due date moves every time the
+    /// chore is checked off, so this is a one-off — resynced on launch,
+    /// on completion, and after edits.
+    static func syncChoreReminder(for chore: ChoreTask, count: Int) {
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let identifier = "chore-\(chore.id.uuidString)"
+            center.removePendingNotificationRequests(withIdentifiers: [identifier])
+
+            guard chore.remindersEnabled, count > 0 else { return }
+
+            let calendar = Calendar.current
+            var fireDate = calendar.date(bySettingHour: 9, minute: 0, second: 0,
+                                         of: chore.nextDue(count: count)) ?? chore.nextDue(count: count)
+            while fireDate <= .now {
+                guard let next = calendar.date(byAdding: .day, value: 1, to: fireDate) else { return }
+                fireDate = next
+            }
+
+            let content = UNMutableNotificationContent()
+            content.title = "🧹 \(chore.name)"
+            var detail = "\(chore.countDescription(count: count)) · \(chore.intervalDescription(count: count).lowercased())"
+            if let location = chore.household { detail = "\(location.name) — " + detail }
+            content.body = detail + (chore.notes.isEmpty ? "" : " · \(chore.notes)")
+            content.sound = .default
+
+            let comps = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: fireDate)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+            center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: trigger))
+        }
+    }
+
+    /// Cancels a deleted chore's pending notification.
+    static func removeChoreReminder(id: UUID) {
+        UNUserNotificationCenter.current()
+            .removePendingNotificationRequests(withIdentifiers: ["chore-\(id.uuidString)"])
+    }
+
+    // MARK: To-dos
+
+    static func syncAllTodos(_ todos: [TodoItem]) {
+        for todo in todos { syncTodoReminder(for: todo) }
+    }
+
+    /// One notification at 9 AM on the to-do's due day (or the next 9 AM
+    /// once it's overdue — a daily nudge, since this is resynced on every
+    /// launch). Undated to-dos never notify.
+    static func syncTodoReminder(for todo: TodoItem) {
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let identifier = "todo-\(todo.id.uuidString)"
+            center.removePendingNotificationRequests(withIdentifiers: [identifier])
+
+            // The editor's onDisappear sync can land after a delete —
+            // never reschedule for a to-do that's gone.
+            guard !todo.isDeleted else { return }
+            guard todo.remindersEnabled, todo.isOpen, let due = todo.nextDue else { return }
+
+            let calendar = Calendar.current
+            var fireDate = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: due) ?? due
+            while fireDate <= .now {
+                guard let next = calendar.date(byAdding: .day, value: 1, to: fireDate) else { return }
+                fireDate = next
+            }
+
+            let content = UNMutableNotificationContent()
+            content.title = "📌 \(todo.title)"
+            content.body = [todo.attachmentDescription, todo.dueDescription, todo.notes]
+                .filter { !$0.isEmpty }
+                .joined(separator: " · ")
+            if content.body.isEmpty { content.body = "On your TailVault to-do list." }
+            content.sound = .default
+
+            let comps = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: fireDate)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+            center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: trigger))
+        }
+    }
+
+    /// Cancels a deleted to-do's pending notification.
+    static func removeTodoReminder(id: UUID) {
+        UNUserNotificationCenter.current()
+            .removePendingNotificationRequests(withIdentifiers: ["todo-\(id.uuidString)"])
+    }
+
     // MARK: Vet visits
 
     /// Schedules a reminder at 9 AM the day before the visit.

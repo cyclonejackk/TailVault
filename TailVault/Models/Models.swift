@@ -524,6 +524,9 @@ final class Pet {
     @Relationship(deleteRule: .cascade, inverse: \JournalEntry.pet)
     var observations: [JournalEntry] = []
 
+    @Relationship(deleteRule: .cascade, inverse: \TodoItem.pet)
+    var todos: [TodoItem] = []
+
     // "Notion for pets" — arbitrary user-defined fields
     // (Insurance policy #, groomer, harness size, favorite word...).
     @Relationship(deleteRule: .cascade, inverse: \CustomField.pet)
@@ -878,6 +881,14 @@ final class Household {
 
     @Relationship(inverse: \Pet.household) var pets: [Pet] = []
 
+    /// Cleaning chores tied to this location — deleted with it.
+    @Relationship(deleteRule: .cascade, inverse: \ChoreTask.household)
+    var chores: [ChoreTask] = []
+
+    /// To-dos tied to this location — deleted with it.
+    @Relationship(deleteRule: .cascade, inverse: \TodoItem.household)
+    var todos: [TodoItem] = []
+
     init(name: String, address: String = "", notes: String = "") {
         self.id = UUID()
         self.name = name
@@ -1157,5 +1168,367 @@ final class AttendanceEntry {
     init(pet: Pet?, present: Bool = false) {
         self.pet = pet
         self.present = present
+    }
+}
+
+// MARK: - Cleaning chores
+
+/// A recurring "change the dirty thing" reminder — litter box, tank water,
+/// cage bedding, stall hay. Tied to a species and (optionally) a location;
+/// the interval shrinks as more matching animals live there, because three
+/// cats dirty a litter box three times as fast as one.
+@Model
+final class ChoreTask {
+    var id: UUID = UUID()
+    var name: String = ""              // "Litter box change"
+    var species: String = ""           // "" = counts every animal at the location
+    /// Days between cleanings *for one animal*. The effective interval is
+    /// this divided by the animal count, never less than daily.
+    var baseIntervalDays: Int = 3
+    var remindersEnabled: Bool = true
+    var notes: String = ""
+    var startDate: Date = Date.now
+    var lastCompleted: Date?
+    /// The completion before `lastCompleted` — lets a mis-tap be undone
+    /// without keeping a full log.
+    var previousCompleted: Date?
+    /// Non-empty when this chore was auto-created from `ChoreDefaults`,
+    /// so seeding never duplicates it.
+    var sourceKey: String = ""
+    var sortOrder: Int = 0
+    /// Nil = applies wherever you are (no location filter).
+    var household: Household?
+
+    init(
+        name: String,
+        species: String = "",
+        baseIntervalDays: Int = 3,
+        remindersEnabled: Bool = true,
+        notes: String = "",
+        sourceKey: String = "",
+        household: Household? = nil
+    ) {
+        self.id = UUID()
+        self.name = name
+        self.species = species
+        self.baseIntervalDays = baseIntervalDays
+        self.remindersEnabled = remindersEnabled
+        self.notes = notes
+        self.startDate = .now
+        self.sourceKey = sourceKey
+        self.household = household
+    }
+
+    /// Active pets this chore covers: at its location (unassigned pets count
+    /// everywhere, matching how the location switcher shows them), and of
+    /// its species. Empty species matches every animal.
+    func matchingPets(in allPets: [Pet]) -> [Pet] {
+        allPets.filter { pet in
+            guard pet.isActive else { return false }
+            if let location = household,
+               let petHome = pet.household,
+               petHome.id != location.id { return false }
+            guard !species.isEmpty else { return true }
+            return pet.species.caseInsensitiveCompare(species) == .orderedSame
+        }
+    }
+
+    /// Base interval ÷ animal count, rounded, never below 1 day.
+    func effectiveIntervalDays(count: Int) -> Int {
+        guard count > 1 else { return max(baseIntervalDays, 1) }
+        let days = (Double(baseIntervalDays) / Double(count)).rounded()
+        return max(Int(days), 1)
+    }
+
+    /// Midnight of the day the next cleaning is owed.
+    func nextDue(count: Int) -> Date {
+        let cal = Calendar.current
+        let anchor = cal.startOfDay(for: lastCompleted ?? startDate)
+        return cal.date(byAdding: .day, value: effectiveIntervalDays(count: count),
+                        to: anchor) ?? anchor
+    }
+
+    /// Due today or overdue.
+    func isDue(count: Int) -> Bool {
+        nextDue(count: count) <= .now || Calendar.current.isDateInToday(nextDue(count: count))
+    }
+
+    func isOverdue(count: Int) -> Bool {
+        nextDue(count: count) < Calendar.current.startOfDay(for: .now)
+    }
+
+    var completedToday: Bool {
+        guard let lastCompleted else { return false }
+        return Calendar.current.isDateInToday(lastCompleted)
+    }
+
+    /// "Every 2 days" / "Daily".
+    func intervalDescription(count: Int) -> String {
+        let days = effectiveIntervalDays(count: count)
+        return days == 1 ? "Daily" : "Every \(days) days"
+    }
+
+    /// "3 cats" / "1 hamster" / "2 animals" (empty species).
+    func countDescription(count: Int) -> String {
+        let noun = species.isEmpty ? "animal" : species.lowercased()
+        return "\(count) \(noun)\(count == 1 ? "" : "s")"
+    }
+
+    func markDone(at date: Date = .now) {
+        previousCompleted = lastCompleted
+        lastCompleted = date
+    }
+
+    /// Reverts the most recent `markDone`.
+    func undoDone() {
+        lastCompleted = previousCompleted
+        previousCompleted = nil
+    }
+}
+
+// MARK: - Chore defaults & auto-creation
+
+/// Built-in "things that get dirty" per species. `baseIntervalDays` is for
+/// a single animal; the live interval scales down with the head count.
+enum ChoreDefaults {
+    struct Preset {
+        let key: String        // stable identity for seed-once bookkeeping
+        let species: String
+        let name: String
+        let baseIntervalDays: Int
+    }
+
+    static let all: [Preset] = [
+        Preset(key: "cat.litter",        species: "Cat",        name: "Litter box change",       baseIntervalDays: 4),
+        Preset(key: "dog.bedding",       species: "Dog",        name: "Wash bedding & bowls",    baseIntervalDays: 7),
+        Preset(key: "fish.water",        species: "Fish",       name: "Partial water change",    baseIntervalDays: 7),
+        Preset(key: "hamster.bedding",   species: "Hamster",    name: "Cage sawdust change",     baseIntervalDays: 7),
+        Preset(key: "guineapig.bedding", species: "Guinea Pig", name: "Cage bedding change",     baseIntervalDays: 4),
+        Preset(key: "rabbit.hutch",      species: "Rabbit",     name: "Hutch & litter clean",    baseIntervalDays: 3),
+        Preset(key: "bird.liner",        species: "Bird",       name: "Cage liner change",       baseIntervalDays: 2),
+        Preset(key: "ferret.bedding",    species: "Ferret",     name: "Cage & litter clean",     baseIntervalDays: 3),
+        Preset(key: "reptile.enclosure", species: "Reptile",    name: "Enclosure spot clean",    baseIntervalDays: 7),
+        Preset(key: "snake.enclosure",   species: "Snake",      name: "Enclosure spot clean",    baseIntervalDays: 7),
+        Preset(key: "turtle.tank",       species: "Turtle",     name: "Tank water change",       baseIntervalDays: 7),
+        Preset(key: "horse.stall",       species: "Horse",      name: "Fresh hay & muck stall",  baseIntervalDays: 1),
+        Preset(key: "goat.pen",          species: "Goat",       name: "Pen clean & fresh hay",   baseIntervalDays: 2),
+        Preset(key: "chicken.coop",      species: "Chicken",    name: "Coop bedding refresh",    baseIntervalDays: 7),
+        Preset(key: "pig.pen",           species: "Pig",        name: "Pen clean",               baseIntervalDays: 2)
+    ]
+
+    private static let seededKey = "seededChoreKeys"
+
+    /// Auto-creates a chore per matching preset, per location, the first
+    /// time animals of that species are seen there. Seeding is remembered
+    /// in UserDefaults, so deleting a chore never resurrects it. Call on
+    /// launch and when the dashboard appears — cheap and idempotent.
+    static func autoCreate(context: ModelContext) {
+        #if os(macOS)
+        // Chore seeding stays iPhone-only. The seed bookkeeping below lives
+        // in per-device UserDefaults, so seeding on the Mac would duplicate
+        // chores that already exist in iCloud — and resurrect ones deleted
+        // on the iPhone. Synced chores still show and work normally here.
+        return
+        #else
+        autoCreateBody(context: context)
+        #endif
+    }
+
+    private static func autoCreateBody(context: ModelContext) {
+        guard let pets = try? context.fetch(FetchDescriptor<Pet>()),
+              let households = try? context.fetch(FetchDescriptor<Household>()),
+              let existing = try? context.fetch(FetchDescriptor<ChoreTask>())
+        else { return }
+
+        var seeded = Set(UserDefaults.standard.stringArray(forKey: seededKey) ?? [])
+        var changed = false
+
+        // Presets already covering everywhere as a global chore (seeded
+        // before any location existed) — never re-seed those per location,
+        // or the first added location would duplicate every chore.
+        let globalKeys = Set(existing.compactMap {
+            $0.household == nil && !$0.sourceKey.isEmpty ? $0.sourceKey : nil
+        })
+
+        // With no locations set up, chores are global (household nil).
+        let locations: [Household?] = households.isEmpty ? [nil] : households
+
+        for location in locations {
+            let locationTag = location?.id.uuidString ?? "global"
+            for preset in all {
+                let seedKey = "\(locationTag)|\(preset.key)"
+                guard !seeded.contains(seedKey) else { continue }
+                if location != nil, globalKeys.contains(preset.key) {
+                    seeded.insert(seedKey)
+                    changed = true
+                    continue
+                }
+
+                let hasAnimals = pets.contains { pet in
+                    guard pet.isActive,
+                          pet.species.caseInsensitiveCompare(preset.species) == .orderedSame
+                    else { return false }
+                    if let location, let home = pet.household { return home.id == location.id }
+                    return true
+                }
+                guard hasAnimals else { continue }
+
+                context.insert(ChoreTask(
+                    name: preset.name,
+                    species: preset.species,
+                    baseIntervalDays: preset.baseIntervalDays,
+                    sourceKey: preset.key,
+                    household: location
+                ))
+                seeded.insert(seedKey)
+                changed = true
+            }
+        }
+
+        if changed {
+            UserDefaults.standard.set(Array(seeded), forKey: seededKey)
+            // Explicit save — the launch-time context has no autosave.
+            try? context.save()
+        }
+    }
+}
+
+// MARK: - To-dos
+
+/// A free-form task — one-off ("fix the barn gate") or repeating on a
+/// fixed interval ("flea treatment every 30 days"). Optionally attached
+/// to a pet (follows the pet around) or a location (only shows there);
+/// attached to neither, it shows everywhere.
+@Model
+final class TodoItem {
+    var id: UUID = UUID()
+    var title: String = ""
+    var notes: String = ""
+    /// Nil = no deadline; the to-do just sits on the list until done.
+    /// For a repeating to-do this always holds the next occurrence.
+    var dueDate: Date?
+    /// 0 = one-off. Above 0, checking it off schedules the next occurrence
+    /// this many days out.
+    var repeatDays: Int = 0
+    var remindersEnabled: Bool = true
+    var startDate: Date = Date.now
+    var lastCompleted: Date?
+    /// Pre-completion state, so a mis-tap can be undone: the previous
+    /// completion stamp and the due date that was in force.
+    var previousCompleted: Date?
+    var previousDueDate: Date?
+    var sortOrder: Int = 0
+    var pet: Pet?
+    var household: Household?
+
+    init(
+        title: String = "",
+        notes: String = "",
+        dueDate: Date? = nil,
+        repeatDays: Int = 0,
+        remindersEnabled: Bool = true,
+        pet: Pet? = nil,
+        household: Household? = nil
+    ) {
+        self.id = UUID()
+        self.title = title
+        self.notes = notes
+        self.dueDate = dueDate
+        self.repeatDays = repeatDays
+        self.remindersEnabled = remindersEnabled
+        self.startDate = .now
+        self.pet = pet
+        self.household = household
+    }
+
+    var isRepeating: Bool { repeatDays > 0 }
+
+    /// One-offs close for good once completed; repeating to-dos never close.
+    var isOpen: Bool { isRepeating || lastCompleted == nil }
+
+    var completedToday: Bool {
+        guard let lastCompleted else { return false }
+        return Calendar.current.isDateInToday(lastCompleted)
+    }
+
+    /// When it's next owed. Nil only for an undated one-off.
+    var nextDue: Date? {
+        if let dueDate { return dueDate }
+        guard isRepeating else { return nil }
+        let cal = Calendar.current
+        let anchor = cal.startOfDay(for: lastCompleted ?? startDate)
+        return cal.date(byAdding: .day, value: repeatDays, to: anchor)
+    }
+
+    var isOverdue: Bool {
+        guard isOpen, let nextDue else { return false }
+        return nextDue < Calendar.current.startOfDay(for: .now)
+    }
+
+    /// Belongs on today's checklist: open and either undated or due by the
+    /// end of today. (Completed-today rows are kept by the views themselves.)
+    var isDueNow: Bool {
+        guard isOpen else { return false }
+        guard let nextDue else { return true }
+        let cal = Calendar.current
+        return nextDue < cal.startOfDay(for: .now) || cal.isDateInToday(nextDue)
+    }
+
+    /// Visible at a location: pet-attached follows the pet, location-attached
+    /// sticks to its location, unattached shows everywhere. Mirrors
+    /// `Array<Pet>.at(_:)` — unassigned pets are visible at every location.
+    func isVisible(at location: Household?) -> Bool {
+        if let pet {
+            guard let location, let home = pet.household else { return true }
+            return home.id == location.id
+        }
+        if let household {
+            guard let location else { return true }
+            return household.id == location.id
+        }
+        return true
+    }
+
+    /// "Milo" / "Barn" / "" — who or where this belongs to.
+    var attachmentDescription: String {
+        pet?.name ?? household?.name ?? ""
+    }
+
+    /// "Due today" / "Overdue since Aug 20" / "Due Sep 3" / "Repeats every 30 days".
+    var dueDescription: String {
+        let cal = Calendar.current
+        var parts: [String] = []
+        if let nextDue {
+            if nextDue < cal.startOfDay(for: .now), isOpen {
+                parts.append("Overdue since \(nextDue.formatted(date: .abbreviated, time: .omitted))")
+            } else if cal.isDateInToday(nextDue) {
+                parts.append("Due today")
+            } else {
+                parts.append("Due \(nextDue.formatted(date: .abbreviated, time: .omitted))")
+            }
+        }
+        if isRepeating {
+            parts.append(repeatDays == 1 ? "repeats daily" : "repeats every \(repeatDays) days")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    func markDone(at date: Date = .now) {
+        previousCompleted = lastCompleted
+        previousDueDate = dueDate
+        lastCompleted = date
+        if isRepeating {
+            let cal = Calendar.current
+            dueDate = cal.date(byAdding: .day, value: repeatDays,
+                               to: cal.startOfDay(for: date))
+        }
+    }
+
+    /// Reverts the most recent `markDone`, due date included.
+    func undoDone() {
+        lastCompleted = previousCompleted
+        dueDate = previousDueDate
+        previousCompleted = nil
+        previousDueDate = nil
     }
 }

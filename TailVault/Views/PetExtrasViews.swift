@@ -37,7 +37,7 @@ struct ExpenseEditView: View {
             TextField("Note (annual exam, 16 lb bag…)", text: $note, axis: .vertical)
         }
         .navigationTitle("Add Expense")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }
@@ -74,15 +74,15 @@ struct ObservationEditView: View {
             PhotosPicker(selection: $photoItem, matching: .images) {
                 Label(photoData == nil ? "Add photo" : "Change photo", systemImage: "camera")
             }
-            if let photoData, let image = UIImage(data: photoData) {
-                Image(uiImage: image)
+            if let photoData, let image = PlatformImage(data: photoData) {
+                Image(platformImage: image)
                     .resizable().scaledToFit()
                     .frame(maxHeight: 200)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
             }
         }
         .navigationTitle("Journal Entry")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }
@@ -113,14 +113,14 @@ struct DocumentDetailView: View {
             TextField("Name (Rabies certificate…)", text: $document.name)
             DatePicker("Date", selection: $document.date, displayedComponents: .date)
             TextField("Notes", text: $document.notes, axis: .vertical)
-            if let data = document.imageData, let image = UIImage(data: data) {
-                Image(uiImage: image)
+            if let data = document.imageData, let image = PlatformImage(data: data) {
+                Image(platformImage: image)
                     .resizable().scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 10))
             }
-            if let data = document.imageData, let image = UIImage(data: data) {
-                ShareLink(item: Image(uiImage: image),
-                          preview: SharePreview(document.name, image: Image(uiImage: image))) {
+            if let data = document.imageData, let image = PlatformImage(data: data) {
+                ShareLink(item: Image(platformImage: image),
+                          preview: SharePreview(document.name, image: Image(platformImage: image))) {
                     Label("Share document", systemImage: "square.and.arrow.up")
                 }
             }
@@ -130,7 +130,7 @@ struct DocumentDetailView: View {
             }
         }
         .navigationTitle(document.name)
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Done") { dismiss() }
@@ -153,8 +153,8 @@ struct LostPetFlyerView: View {
                 .font(.system(size: 44, weight: .black))
                 .foregroundStyle(.red)
 
-            if let data = pet.photoData, let image = UIImage(data: data) {
-                Image(uiImage: image)
+            if let data = pet.photoData, let image = PlatformImage(data: data) {
+                Image(platformImage: image)
                     .resizable().scaledToFill()
                     .frame(width: 420, height: 420)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -206,7 +206,14 @@ enum FlyerRenderer {
             content: LostPetFlyerView(pet: pet, ownerName: ownerName, ownerPhone: ownerPhone)
         )
         renderer.scale = 2
+        #if os(iOS)
         guard let image = renderer.uiImage, let data = image.pngData() else { return nil }
+        #else
+        guard let image = renderer.nsImage,
+              let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let data = rep.representation(using: .png, properties: [:]) else { return nil }
+        #endif
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(pet.name) Flyer.png")
         try? data.write(to: url, options: .atomic)

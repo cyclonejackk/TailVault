@@ -18,12 +18,15 @@ struct SettingsView: View {
     @Query(sort: \AttendanceRecord.date, order: .reverse) private var records: [AttendanceRecord]
     @Query(sort: \VetClinic.name) private var clinics: [VetClinic]
     @Query(sort: \Household.name) private var households: [Household]
+    @Query(sort: \ChoreTask.name) private var chores: [ChoreTask]
+    @AppStorage(CurrentLocation.key) private var currentLocationID = ""
 
     @State private var exportURL: URL?
     @State private var showingAddClinic = false
     @State private var newClinicName = ""
     @State private var showingAddHousehold = false
     @State private var newHouseholdName = ""
+    @State private var newChore: ChoreTask?
 
     var body: some View {
         NavigationStack {
@@ -130,17 +133,63 @@ struct SettingsView: View {
                         }
                     }
                     .onDelete { offsets in
-                        for index in offsets { context.delete(households[index]) }
+                        for index in offsets {
+                            let household = households[index]
+                            // Deleting a location cascades to its chores and
+                            // to-dos — cancel their pending reminders first.
+                            for chore in household.chores {
+                                NotificationManager.removeChoreReminder(id: chore.id)
+                            }
+                            for todo in household.todos {
+                                NotificationManager.removeTodoReminder(id: todo.id)
+                            }
+                            context.delete(household)
+                        }
                     }
                     Button {
                         showingAddHousehold = true
                     } label: {
-                        Label("Add household", systemImage: "plus.circle")
+                        Label("Add location", systemImage: "plus.circle")
                     }
                 } header: {
-                    Text("Households")
+                    Text("Locations")
                 } footer: {
-                    Text("Deleting a household never deletes its pets — they just become unassigned.")
+                    Text("The location dropdown at the top of every page switches between these. Deleting a location never deletes its pets — they just become unassigned and show everywhere.")
+                }
+
+                Section {
+                    ForEach(sortedChores) { chore in
+                        NavigationLink {
+                            ChoreEditView(chore: chore)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(chore.name)
+                                Text(choreSubtitle(chore))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .onDelete { offsets in
+                        for index in offsets {
+                            let chore = sortedChores[index]
+                            NotificationManager.removeChoreReminder(id: chore.id)
+                            context.delete(chore)
+                        }
+                    }
+                    Button {
+                        let chore = ChoreTask(
+                            name: "New cleaning task",
+                            household: CurrentLocation.resolve(from: households,
+                                                               idString: currentLocationID))
+                        context.insert(chore)
+                        newChore = chore
+                    } label: {
+                        Label("Add cleaning reminder", systemImage: "plus.circle")
+                    }
+                } header: {
+                    Text("Cleaning reminders")
+                } footer: {
+                    Text("Litter boxes, tank water, cage bedding… Auto-created per species per location, and the interval shrinks as more animals live there. Deleting one won't bring it back.")
                 }
 
                 Section("About") {
@@ -150,8 +199,14 @@ struct SettingsView: View {
             }
             .themedSurface(tintTheme)
             .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .trailingBar) { LocationMenu() }
+            }
             .sheet(item: $exportURL) { url in
                 ShareSheet(url: url)
+            }
+            .sheet(item: $newChore) { chore in
+                NavigationStack { ChoreEditView(chore: chore) }
             }
             .alert("New clinic", isPresented: $showingAddClinic) {
                 TextField("Clinic name", text: $newClinicName)
@@ -164,8 +219,8 @@ struct SettingsView: View {
             } message: {
                 Text("Tap the clinic afterward to add phone, address, and notes.")
             }
-            .alert("New household", isPresented: $showingAddHousehold) {
-                TextField("Household name (House, Barn, a client…)", text: $newHouseholdName)
+            .alert("New location", isPresented: $showingAddHousehold) {
+                TextField("Location name (House, Barn, a client…)", text: $newHouseholdName)
                 Button("Add") {
                     let trimmed = newHouseholdName.trimmingCharacters(in: .whitespaces)
                     if !trimmed.isEmpty { context.insert(Household(name: trimmed)) }
@@ -177,6 +232,118 @@ struct SettingsView: View {
             }
         }
     }
+
+    /// Grouped by location name, then chore name, so each location's
+    /// chores read as a block.
+    private var sortedChores: [ChoreTask] {
+        chores.sorted {
+            (($0.household?.name ?? ""), $0.name) < (($1.household?.name ?? ""), $1.name)
+        }
+    }
+
+    /// "3 cats · every 2 days · Home" — or a nudge when no animals match.
+    private func choreSubtitle(_ chore: ChoreTask) -> String {
+        let count = chore.matchingPets(in: pets).count
+        let location = chore.household?.name ?? "All locations"
+        guard count > 0 else {
+            let noun = chore.species.isEmpty ? "animals" : "\(chore.species.lowercased())s"
+            return "No \(noun) here yet · \(location)"
+        }
+        return [chore.countDescription(count: count),
+                chore.intervalDescription(count: count).lowercased(),
+                location]
+            .joined(separator: " · ")
+    }
+}
+
+// MARK: - Chore editor
+
+struct ChoreEditView: View {
+    @Bindable var chore: ChoreTask
+    @Query(sort: \Pet.name) private var pets: [Pet]
+    @Query(sort: \Household.name) private var households: [Household]
+
+    private var count: Int { chore.matchingPets(in: pets).count }
+
+    /// Preset species plus any custom species your pets actually use
+    /// (a "Bearded Dragon" chore should be pickable too).
+    private var speciesOptions: [String] {
+        var names = SpeciesCatalog.common.map(\.name)
+        let extras = Set(pets.map(\.species)).union([chore.species])
+        for extra in extras.sorted()
+        where !extra.isEmpty
+            && !names.contains(where: { $0.caseInsensitiveCompare(extra) == .orderedSame }) {
+            names.append(extra)
+        }
+        return names
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("Name (Litter box change…)", text: $chore.name)
+                Picker("Animal type", selection: $chore.species) {
+                    Text("Any animal").tag("")
+                    ForEach(speciesOptions, id: \.self) { name in
+                        Text("\(SpeciesCatalog.emoji(for: name)) \(name)").tag(name)
+                    }
+                }
+                Stepper(value: $chore.baseIntervalDays, in: 1...60) {
+                    LabeledContent("For one animal",
+                                   value: chore.baseIntervalDays == 1
+                                       ? "Daily"
+                                       : "Every \(chore.baseIntervalDays) days")
+                }
+            } footer: {
+                Text(count > 1
+                     ? "With \(chore.countDescription(count: count)) here, this runs \(chore.intervalDescription(count: count).lowercased()) — the base interval divided by the head count, never less than daily."
+                     : "More animals shorten the interval automatically — the base interval is divided by the head count.")
+            }
+
+            if !households.isEmpty {
+                Section {
+                    Picker("Location", selection: Binding(
+                        get: { chore.household?.id.uuidString ?? "" },
+                        set: { idString in
+                            chore.household = households.first { $0.id.uuidString == idString }
+                        }
+                    )) {
+                        Text("All locations").tag("")
+                        ForEach(households) { h in
+                            Text(h.name).tag(h.id.uuidString)
+                        }
+                    }
+                } footer: {
+                    Text("Only animals at this location count toward the frequency.")
+                }
+            }
+
+            Section {
+                Toggle("Remind me", isOn: $chore.remindersEnabled)
+                TextField("Notes (bin liner size, which closet…)",
+                          text: $chore.notes, axis: .vertical)
+            } footer: {
+                Text("Reminders arrive at 9 AM on the day a cleaning comes due.")
+            }
+
+            if let last = chore.lastCompleted {
+                Section {
+                    LabeledContent("Last done",
+                                   value: last.formatted(date: .abbreviated, time: .shortened))
+                    if count > 0 {
+                        LabeledContent("Next due",
+                                       value: chore.nextDue(count: count)
+                                           .formatted(date: .abbreviated, time: .omitted))
+                    }
+                }
+            }
+        }
+        .navigationTitle(chore.name.isEmpty ? "Cleaning task" : chore.name)
+        .inlineNavigationTitle()
+        .onDisappear {
+            NotificationManager.syncChoreReminder(for: chore, count: count)
+        }
+    }
 }
 
 // MARK: - Household editor
@@ -186,7 +353,7 @@ struct HouseholdEditView: View {
 
     var body: some View {
         Form {
-            Section("Household") {
+            Section("Location") {
                 TextField("Name", text: $household.name)
                 TextField("Address", text: $household.address, axis: .vertical)
                 TextField("Notes", text: $household.notes, axis: .vertical)
@@ -206,7 +373,7 @@ struct HouseholdEditView: View {
             }
         }
         .navigationTitle(household.name)
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
     }
 }
 
@@ -227,6 +394,6 @@ struct ClinicEditView: View {
             TextField("Notes", text: $clinic.notes, axis: .vertical)
         }
         .navigationTitle(clinic.name)
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
     }
 }

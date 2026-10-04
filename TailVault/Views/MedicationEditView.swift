@@ -98,7 +98,7 @@ struct MedicationEditView: View {
         }
         .themedSurface(tintTheme)
         .navigationTitle(medication == nil ? "New Medication" : "Edit Medication")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }

@@ -21,6 +21,7 @@ struct PetEditView: View {
     let pet: Pet?
 
     @AppStorage("tintTheme") private var tintTheme: TintTheme = .sky
+    @AppStorage(CurrentLocation.key) private var currentLocationID = ""
 
     // Draft state
     @State private var name = ""
@@ -105,15 +106,15 @@ struct PetEditView: View {
                 TextField("Collar/Tag # (tracker, name tag…)", text: $collarTag)
             }
 
-            Section("Household") {
-                Picker("Household", selection: $selectedHousehold) {
+            Section("Location") {
+                Picker("Location", selection: $selectedHousehold) {
                     Text("None").tag(nil as Household?)
                     ForEach(households) { household in
                         Text(household.name).tag(household as Household?)
                     }
                 }
                 HStack {
-                    TextField("New household name", text: $newHouseholdName)
+                    TextField("New location name", text: $newHouseholdName)
                     Button("Add") {
                         let household = Household(name: newHouseholdName)
                         context.insert(household)
@@ -229,7 +230,7 @@ struct PetEditView: View {
         }
         .themedSurface(tintTheme)
         .navigationTitle(pet == nil ? "New Pet" : "Edit \(pet!.name)")
-        .navigationBarTitleDisplayMode(.inline)
+        .inlineNavigationTitle()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }
@@ -265,7 +266,12 @@ struct PetEditView: View {
     // MARK: Load / save
 
     private func load() {
-        guard let pet else { return }
+        guard let pet else {
+            // New pets start at the current location.
+            selectedHousehold = CurrentLocation.resolve(
+                from: households, idString: currentLocationID)
+            return
+        }
         name = pet.name
         if SpeciesCatalog.common.contains(where: { $0.name == pet.species }) {
             species = pet.species

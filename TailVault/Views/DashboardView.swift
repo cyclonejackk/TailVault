@@ -17,11 +17,24 @@ struct DashboardView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Pet.name) private var pets: [Pet]
     @Query(sort: \AttendanceRecord.date, order: .reverse) private var records: [AttendanceRecord]
+    @Query(sort: \Household.name) private var households: [Household]
+    @Query(sort: \ChoreTask.name) private var chores: [ChoreTask]
+    @Query(sort: \TodoItem.title) private var todos: [TodoItem]
     @AppStorage("tintTheme") private var tintTheme: TintTheme = .sky
+    @AppStorage(CurrentLocation.key) private var currentLocationID = ""
 
     @State private var showingAttendance = false
+    @State private var showPastMeds = false
+    @State private var newTodo: TodoItem?
+    /// Kept alongside `newTodo` so the dismiss handler can discard an
+    /// add that was abandoned without a title.
+    @State private var pendingTodo: TodoItem?
 
-    private var activePets: [Pet] { pets.filter(\.isActive) }
+    private var currentLocation: Household? {
+        CurrentLocation.resolve(from: households, idString: currentLocationID)
+    }
+
+    private var activePets: [Pet] { pets.filter(\.isActive).at(currentLocation) }
 
     // MARK: Today's meds
 
@@ -55,6 +68,14 @@ struct DashboardView: View {
             ($0.done ? 1 : 0, $0.firstDoseMinutes, $0.pet.name)
                 < ($1.done ? 1 : 0, $1.firstDoseMinutes, $1.pet.name)
         }
+    }
+
+    /// Ended (inactive) meds for pets shown here, newest ending first.
+    private var pastMeds: [(pet: Pet, med: Medication)] {
+        activePets.flatMap { pet in
+            pet.medications.filter { !$0.isActive }.map { (pet, $0) }
+        }
+        .sorted { ($0.med.endDate ?? .distantPast) > ($1.med.endDate ?? .distantPast) }
     }
 
     private func isDoseDay(_ med: Medication) -> Bool {
@@ -145,6 +166,55 @@ struct DashboardView: View {
         }
     }
 
+    // MARK: Today's cleaning
+
+    private struct ChoreDue: Identifiable {
+        var id: UUID { chore.id }
+        let chore: ChoreTask
+        let count: Int
+        var done: Bool { chore.completedToday }
+    }
+
+    /// Chores at the current location that are due (or already done today,
+    /// so the checked row sticks around). Chores with no matching animals
+    /// stay hidden.
+    private var choresToday: [ChoreDue] {
+        chores.compactMap { chore -> ChoreDue? in
+            guard chore.household == nil || chore.household?.id == currentLocation?.id
+            else { return nil }
+            let count = chore.matchingPets(in: pets).count
+            guard count > 0, chore.isDue(count: count) || chore.completedToday
+            else { return nil }
+            return ChoreDue(chore: chore, count: count)
+        }
+        .sorted { ($0.done ? 1 : 0, $0.chore.name) < ($1.done ? 1 : 0, $1.chore.name) }
+    }
+
+    // MARK: Today's to-dos
+
+    private struct TodoDue: Identifiable {
+        var id: UUID { todo.id }
+        let todo: TodoItem
+        /// Checked state: a closed one-off, or a repeating to-do already
+        /// done today.
+        var done: Bool { !todo.isOpen || todo.completedToday }
+    }
+
+    /// To-dos visible here that are due, undated, or done today (so the
+    /// checked row sticks around until tomorrow).
+    private var todosToday: [TodoDue] {
+        todos.compactMap { todo -> TodoDue? in
+            guard todo.isVisible(at: currentLocation),
+                  todo.isDueNow || todo.completedToday
+            else { return nil }
+            return TodoDue(todo: todo)
+        }
+        .sorted {
+            ($0.done ? 1 : 0, $0.todo.nextDue ?? .distantFuture, $0.todo.title)
+                < ($1.done ? 1 : 0, $1.todo.nextDue ?? .distantFuture, $1.todo.title)
+        }
+    }
+
     // MARK: Today at a glance
 
     private struct RoutineProgress {
@@ -205,7 +275,10 @@ struct DashboardView: View {
             }
         }
 
-        let attendanceToday = records.contains { cal.isDateInToday($0.date) }
+        let attendanceToday = records.contains {
+            cal.isDateInToday($0.date)
+                && (currentLocation == nil || $0.location == currentLocation?.name)
+        }
         if !attendanceToday && !activePets.isEmpty {
             items.append(DashAlert(
                 icon: "checklist", color: .teal,
@@ -237,12 +310,15 @@ struct DashboardView: View {
 
     private var hasRoutines: Bool {
         !medsToday.isEmpty || !feedingsToday.isEmpty || !walksToday.isEmpty
+            || !choresToday.isEmpty || !todosToday.isEmpty
     }
 
     private var allClear: Bool {
         medsToday.allSatisfy(\.done)
             && feedingsToday.allSatisfy(\.done)
             && walksToday.allSatisfy(\.done)
+            && choresToday.allSatisfy(\.done)
+            && todosToday.allSatisfy(\.done)
             && alerts.isEmpty
             && upcomingVisits.isEmpty
     }
@@ -255,19 +331,42 @@ struct DashboardView: View {
                 greetingSection
                 if hasRoutines { todaySection }
                 if allClear { allClearSection }
-                if !medsToday.isEmpty { medsSection }
+                if !medsToday.isEmpty || !pastMeds.isEmpty { medsSection }
                 if !feedingsToday.isEmpty { feedingsSection }
                 if !alwaysAvailableFoods.isEmpty { freeFedSection }
                 if !walksToday.isEmpty { walksSection }
+                if !choresToday.isEmpty { choresSection }
+                todosSection
                 if !alerts.isEmpty { alertsSection }
                 if !upcomingVisits.isEmpty { upcomingSection }
                 attendanceButtonSection
             }
             .themedSurface(tintTheme)
             .navigationTitle("TailVault")
+            .onAppear {
+                // Seed default chores for any species newly present at a
+                // location, then refresh their reminder notifications.
+                ChoreDefaults.autoCreate(context: context)
+                NotificationManager.syncAllChores(chores, pets: pets)
+                NotificationManager.syncAllTodos(todos)
+            }
+            .toolbar {
+                ToolbarItem(placement: .trailingBar) { LocationMenu() }
+            }
             .navigationDestination(for: Pet.self) { PetDetailView(pet: $0) }
             .sheet(isPresented: $showingAttendance) {
                 NavigationStack { TakeAttendanceView() }
+            }
+            .sheet(item: $newTodo, onDismiss: {
+                // Abandoned without a title → don't keep an empty row.
+                if let todo = pendingTodo,
+                   todo.title.trimmingCharacters(in: .whitespaces).isEmpty {
+                    NotificationManager.removeTodoReminder(id: todo.id)
+                    context.delete(todo)
+                }
+                pendingTodo = nil
+            }) { todo in
+                NavigationStack { TodoEditView(todo: todo) }
             }
         }
     }
@@ -304,6 +403,16 @@ struct DashboardView: View {
                     ProgressChip(icon: "figure.walk", label: "Walks",
                                  done: walkProgress.done, total: walkProgress.total)
                 }
+                if !choresToday.isEmpty {
+                    ProgressChip(icon: "sparkles", label: "Cleaning",
+                                 done: choresToday.filter(\.done).count,
+                                 total: choresToday.count)
+                }
+                if !todosToday.isEmpty {
+                    ProgressChip(icon: "checklist", label: "To-dos",
+                                 done: todosToday.filter(\.done).count,
+                                 total: todosToday.count)
+                }
             }
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 6, trailing: 8))
@@ -339,7 +448,49 @@ struct DashboardView: View {
                     if let last = item.med.lastDoseToday { context.delete(last) }
                 }
             }
+            if !pastMeds.isEmpty {
+                Button {
+                    withAnimation { showPastMeds.toggle() }
+                } label: {
+                    HStack {
+                        Text("Past meds")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: showPastMeds ? "chevron.up" : "chevron.down")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                if showPastMeds {
+                    ForEach(pastMeds, id: \.med.id) { item in
+                        HStack(spacing: 12) {
+                            PetAvatar(pet: item.pet, size: 40)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(item.pet.name): \(item.med.displayName)")
+                                    .font(.subheadline.weight(.medium))
+                                Text(pastMedDetail(item.med))
+                                    .font(.caption)
+                            }
+                            Spacer()
+                        }
+                        .foregroundStyle(.secondary)
+                        .opacity(0.6)
+                    }
+                }
+            }
         }
+    }
+
+    /// "Twice daily · Ended Aug 12, 2026"
+    private func pastMedDetail(_ med: Medication) -> String {
+        let ended = med.endDate.map {
+            "Ended \($0.formatted(date: .abbreviated, time: .omitted))"
+        } ?? "Ended"
+        return [med.frequencyDescription, ended]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
     }
 
     /// "1 of 2 doses · 8:00 AM, 8:00 PM"
@@ -430,6 +581,71 @@ struct DashboardView: View {
          "\(item.schedule.durationMinutes) min"]
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
+    }
+
+    private var choresSection: some View {
+        Section {
+            ForEach(choresToday) { item in
+                ChoreRow(chore: item.chore, count: item.count) {
+                    item.chore.markDone()
+                    NotificationManager.syncChoreReminder(for: item.chore, count: item.count)
+                    Haptics.success()
+                } undo: {
+                    item.chore.undoDone()
+                    NotificationManager.syncChoreReminder(for: item.chore, count: item.count)
+                }
+            }
+        } header: {
+            Text("Cleaning due")
+        } footer: {
+            Text("Frequency scales with the animal count here — edit any chore in Settings → Cleaning reminders.")
+        }
+    }
+
+    private var todosSection: some View {
+        Section {
+            ForEach(todosToday) { item in
+                NavigationLink {
+                    TodoEditView(todo: item.todo)
+                } label: {
+                    TodoRow(todo: item.todo, done: item.done) {
+                        item.todo.markDone()
+                        NotificationManager.syncTodoReminder(for: item.todo)
+                        Haptics.success()
+                    }
+                }
+                .swipeActions(edge: .leading) {
+                    if item.todo.completedToday {
+                        Button {
+                            item.todo.undoDone()
+                            NotificationManager.syncTodoReminder(for: item.todo)
+                            Haptics.success()
+                        } label: {
+                            Label("Undo", systemImage: "arrow.uturn.backward")
+                        }
+                        .tint(.gray)
+                    }
+                }
+                .swipeActions(edge: .trailing) {
+                    Button(role: .destructive) {
+                        NotificationManager.removeTodoReminder(id: item.todo.id)
+                        context.delete(item.todo)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+            }
+            Button {
+                let todo = TodoItem()
+                context.insert(todo)
+                pendingTodo = todo
+                newTodo = todo
+            } label: {
+                Label("Add to-do", systemImage: "plus.circle")
+            }
+        } header: {
+            Text("To-do")
+        }
     }
 
     private var alertsSection: some View {
@@ -528,6 +744,139 @@ private struct ProgressChip: View {
         )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(label): \(done) of \(total) done")
+    }
+}
+
+// MARK: - Chore row
+
+/// A tickable cleaning chore: icon, name, "3 cats · every 2 days" detail,
+/// and a Done button that stamps the completion and reschedules the
+/// reminder. Swipe to undo a mis-tap.
+private struct ChoreRow: View {
+    let chore: ChoreTask
+    let count: Int
+    let action: () -> Void
+    let undo: () -> Void
+
+    private var done: Bool { chore.completedToday }
+
+    private var detail: String {
+        if done { return "Done today · next \(chore.nextDue(count: count).formatted(date: .abbreviated, time: .omitted))" }
+        let due = chore.isOverdue(count: count)
+            ? "overdue since \(chore.nextDue(count: count).formatted(date: .abbreviated, time: .omitted))"
+            : "due today"
+        return [chore.countDescription(count: count),
+                chore.intervalDescription(count: count).lowercased(),
+                due]
+            .joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(Color.teal.opacity(0.18))
+                Text(SpeciesCatalog.emoji(for: chore.species))
+                    .font(.title3)
+            }
+            .frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(chore.name)
+                    .font(.subheadline.weight(.medium))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(done ? Color.green : (chore.isOverdue(count: count) ? Color.orange : Color.secondary))
+                if !chore.notes.isEmpty {
+                    Text(chore.notes)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 8)
+            if done {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.green)
+            } else {
+                Button("Done") { action() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.teal)
+                    .font(.caption)
+            }
+        }
+        .buttonStyle(.borderless)
+        .swipeActions(edge: .leading) {
+            if done {
+                Button {
+                    undo()
+                    Haptics.success()
+                } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                }
+                .tint(.gray)
+            }
+        }
+    }
+}
+
+// MARK: - To-do row
+
+/// A tickable to-do: pet avatar (when attached to a pet) or a checklist
+/// bubble, title, "Milo · due today" detail, and a Done button. The row
+/// itself navigates to the editor.
+private struct TodoRow: View {
+    let todo: TodoItem
+    let done: Bool
+    let action: () -> Void
+
+    private var detail: String {
+        if done, let last = todo.lastCompleted {
+            return "Done \(Calendar.current.isDateInToday(last) ? "today" : last.formatted(date: .abbreviated, time: .omitted))"
+        }
+        let parts = [todo.attachmentDescription, todo.dueDescription]
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? "No due date" : parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if let pet = todo.pet {
+                PetAvatar(pet: pet, size: 40)
+            } else {
+                ZStack {
+                    Circle().fill(Color.indigo.opacity(0.18))
+                    Image(systemName: todo.household == nil ? "checklist" : "mappin.and.ellipse")
+                        .font(.subheadline)
+                        .foregroundStyle(.indigo)
+                }
+                .frame(width: 40, height: 40)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(todo.title)
+                    .font(.subheadline.weight(.medium))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(done ? Color.green : (todo.isOverdue ? Color.orange : Color.secondary))
+                if !todo.notes.isEmpty {
+                    Text(todo.notes)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 8)
+            if done {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.green)
+            } else {
+                Button("Done") { action() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.indigo)
+                    .font(.caption)
+            }
+        }
+        .buttonStyle(.borderless)
     }
 }
 
